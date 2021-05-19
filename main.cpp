@@ -1,175 +1,178 @@
-
-#include <iostream>
-
-#define BOOST_SPIRIT_DEBUG
-
-#include <boost/phoenix.hpp>
-#include <boost/spirit/include/phoenix_function.hpp>
+//#define BOOST_SPIRIT_DEBUG
+#include <boost/spirit/include/phoenix.hpp>
 #include <boost/spirit/include/qi.hpp>
-#include <boost/spirit/include/qi_action.hpp>
-#include <boost/variant.hpp>
+#include <iomanip>
 
 namespace phx = boost::phoenix;
-namespace qi = boost::spirit::qi;
+namespace qi  = boost::spirit::qi;
 
 namespace AST {
+    using Comment      = std::string;
+    using CommentStack = std::vector<Comment>;
 
-struct CommentMixin {
-  std::vector<std::string> comments;
-};
-
-struct Identifier : public std::string, public CommentMixin {};
-struct StringVal : public std::string, public CommentMixin {};
-struct RefVal : public std::string, public CommentMixin {};
-struct DoubleVal : public CommentMixin {
-  double number;
-};
-
-using AttributeValue = boost::variant<StringVal, DoubleVal, RefVal>;
-
-struct AttributeDef {
-  Identifier name;
-  AttributeValue value;
-};
-
-struct ObjectDef {
-  Identifier obj, class_;
-  std::vector<AttributeDef> attributes;
-};
-
-} // namespace AST
-
-namespace AST {
-
-// Parser actions
-
-phx::function const makeBlockComment =
-    [](std::string &comment, const std::string &beg,
-       std::vector<boost::variant<std::string, char>> const &cs,
-       const std::string &end) {
-      class visitor : public boost::static_visitor<std::string> {
-      public:
-        std::string operator()(char c) const { return std::string(1, c); }
-        std::string operator()(const std::string &str) const { return str; }
-      };
-
-      comment.append(beg);
-      for (const auto &c : cs) {
-        comment.append(boost::apply_visitor(visitor(), c));
-      }
-      comment.append(end);
+    struct CommentMixin {
+        CommentStack comments;
     };
 
-phx::function collectComments = [](CommentMixin &node,
-                                   std::vector<std::string> &comments) {
-  std::copy(comments.cbegin(), comments.cend(),
-            std::back_inserter(node.comments));
-  comments.clear();
-};
+    struct Identifier : public std::string, public CommentMixin {};
+    struct StringVal  : public std::string, public CommentMixin {};
+    struct RefVal     : public std::string, public CommentMixin {};
+    struct DoubleVal  : public CommentMixin { double number; };
 
-/**
- * Skipper parser that will handle space and nested comments
- */
-template <typename Iterator> struct SkipperRules : qi::grammar<Iterator> {
-  SkipperRules(std::vector<std::string> &comments)
-      : SkipperRules::base_type(skipper), m_comments(comments) {
-    single_line_comment =
-        qi::lit("//") >> *(qi::char_ - qi::eol) >> (qi::eol | qi::eoi);
-    block_comment =
-        ((qi::string("/*") >> *(block_comment | qi::char_ - "*/")) >>
-         qi::string("*/"))[makeBlockComment(qi::_val, qi::_1, qi::_2, qi::_3)];
-    skipper =
-        qi::space |
-        single_line_comment[phx::push_back(phx::ref(m_comments), qi::_1)] |
-        block_comment[phx::push_back(phx::ref(m_comments), qi::_1)];
-  }
-  std::vector<std::string> &m_comments;
+    using AttributeValue = boost::variant<StringVal, DoubleVal, RefVal>;
 
-  qi::rule<Iterator> skipper;
-  qi::rule<Iterator, std::string()> block_comment;
-  qi::rule<Iterator, std::string()> single_line_comment;
-};
+    struct AttributeDef {
+        Identifier name;
+        AttributeValue value;
+    };
 
-/**
- * Data file Grammar
- */
-template <typename Iterator>
-struct GrammarRules
-    : qi::grammar<Iterator, ObjectDef(), SkipperRules<Iterator>> {
-  GrammarRules(std::vector<std::string> &comments)
-      : GrammarRules::base_type(objectdef), m_comments(comments) {
-    objectdef = (identifier >> identifier >> '(' >> attributedeflist >> ')');
-    attributedeflist = -(attributedef % ',');
-    attributedef = (identifier >> ':' >> attributeval);
+    using AttributeDefs = std::vector<AttributeDef>;
 
-    identifier = qi::lexeme[identimpl];
-    identimpl =
-        ((qi::alpha | qi::char_('_')) >> *(qi::alnum | qi::char_("_.")));
-
-    attributeval = refval | stringliteral | doubleval;
-    stringliteral = qi::lexeme[qi::lit('"') >> *(qi::char_ - qi::char_('"')) >>
-                               qi::lit('"')];
-    doubleval = qi::double_;
-    refval = qi::lit("ref") >> '(' >> -identifier >> ')';
-
-    BOOST_SPIRIT_DEBUG_NODES((objectdef)(attributedeflist)(attributedef)(
-        attributedeflist)(identifier)(attributeval)(stringliteral)(doubleval))
-
-    on_success(identifier, collectComments(qi::_val, phx::ref(m_comments)));
-    on_success(doubleval, collectComments(qi::_val, phx::ref(m_comments)));
-    on_success(stringliteral, collectComments(qi::_val, phx::ref(m_comments)));
-    on_success(refval, collectComments(qi::_val, phx::ref(m_comments)));
-  }
-
-  std::vector<std::string> &m_comments;
-
-  qi::rule<Iterator, ObjectDef(), SkipperRules<Iterator>> objectdef;
-  qi::rule<Iterator, std::vector<AttributeDef>(), SkipperRules<Iterator>>
-      attributedeflist;
-  qi::rule<Iterator, AttributeDef(), SkipperRules<Iterator>> attributedef;
-  qi::rule<Iterator, Identifier()> identifier, identimpl;
-  qi::rule<Iterator, AttributeValue(), SkipperRules<Iterator>> attributeval;
-  qi::rule<Iterator, DoubleVal(), SkipperRules<Iterator>> doubleval;
-  qi::rule<Iterator, RefVal(), SkipperRules<Iterator>> refval;
-  qi::rule<Iterator, StringVal()> stringliteral;
-};
+    struct ObjectDef {
+        Identifier obj, class_;
+        AttributeDefs attributes;
+    };
 
 } // namespace AST
 
-BOOST_FUSION_ADAPT_STRUCT(AST::AttributeDef,
-                          (AST::Identifier, name)(AST::AttributeValue, value));
-BOOST_FUSION_ADAPT_STRUCT(AST::ObjectDef,
-                          (AST::Identifier, obj)(AST::Identifier, class_)(
-                              std::vector<AST::AttributeDef>, attributes));
-BOOST_FUSION_ADAPT_STRUCT(AST::DoubleVal, (double, number));
+namespace AST { // SEHE: debug output helpers
+    std::ostream& dump_comments(std::ostream& os, CommentStack const& cmts)
+    {
+        os << " CMTS[";
+        bool first = true;
+        for (Comment const& c : cmts)
+            os << (std::exchange(first, false)? "":",") << std::quoted(c, '\'');
+        return os << "]";
+    }
 
-template <typename InputIterator>
-bool parser(InputIterator &it, InputIterator end, AST::ObjectDef &objects) {
-  std::vector<std::string> commentStack;
-  AST::GrammarRules<InputIterator> torParser(commentStack);
-  AST::SkipperRules<InputIterator> torSkipper(commentStack);
-  return qi::phrase_parse(it, end, torParser, torSkipper, objects);
+    std::ostream& operator<<(std::ostream& os, DoubleVal const& o)
+    {
+        return dump_comments(os << o.number, o.comments);
+    }
+
+    template <typename T>
+    static inline constexpr bool is_commentful_string =
+            std::is_base_of_v<CommentMixin, std::decay_t<T>>
+        and std::is_base_of_v<std::string, std::decay_t<T>>;
+
+    template <typename T>
+    static inline std::enable_if_t<is_commentful_string<T>, std::ostream&>
+    operator<<(std::ostream& os, T const& o)
+    {
+        return dump_comments(os << std::quoted(o), o.comments);
+    }
+
+    static inline std::ostream& operator<<(std::ostream& os, ObjectDef const& o) {
+        os << "ObjectDef {obj:" << o.obj
+           << ", class_:" << o.class_;
+        for (AttributeDef const& attr : o.attributes) {
+            os << "\n    attr name:" << attr.name
+               << "\n    attr value:" << attr.value;
+        }
+        return os << "\n}";
+    }
+} // namespace AST
+
+namespace Parser {
+    // Parser actions
+    template <typename Iterator>
+    struct ObjectDefParser : qi::grammar<Iterator, AST::ObjectDef()> {
+        ObjectDefParser() : ObjectDefParser::base_type(start) {
+            using namespace qi::labels;
+
+            start = qi::skip(qi::copy(skipper))[objectdef >> qi::eoi];
+            objectdef =
+                (identifier >> identifier >> '(' >> attributedeflist >> ')');
+            attributedeflist = -(attributedef % ',');
+            attributedef     = (identifier >> ':' >> attributeval);
+
+            identifier    = qi::lexeme[identimpl];
+            identimpl     = ((qi::alpha | qi::char_('_')) >>
+                            *(qi::alnum | qi::char_("_.")));
+
+            attributeval  = refval | stringliteral | doubleval;
+            stringliteral = qi::lexeme['"' >> *~qi::char_('"') >> '"'];
+            doubleval     = qi::double_;
+            refval        = "ref" >> ('(' >> -identifier >> ')');
+
+            BOOST_SPIRIT_DEBUG_NODES(
+                (objectdef)(attributedeflist)(attributedef)(attributedeflist)(
+                    identifier)(attributeval)(stringliteral)(doubleval))
+
+            auto collect = phx::function{[=](AST::CommentMixin& node) {
+                node.comments.clear();
+                node.comments.swap(m_comments);
+            }}(_val);
+
+            on_success(identifier,    collect);
+            on_success(doubleval,     collect);
+            on_success(stringliteral, collect);
+            on_success(refval,        collect);
+        }
+
+      private:
+        AST::CommentStack m_comments;
+
+        struct Skip : qi::grammar<Iterator> {
+            Skip(AST::CommentStack& comments) : Skip::base_type(start), m_comments(comments)
+            {
+                using namespace qi;
+                auto push_comment = phx::push_back(phx::ref(m_comments), _1);
+
+                single_line_comment = "//" >> *(char_ - eol) >> (eol | eoi);
+                block_comment       = "/*" >> *(block_comment | char_ - "*/") >> "*/";
+                start               = space |
+                    as_string[raw[single_line_comment | block_comment]]
+                             [push_comment];
+            }
+
+          private:
+            AST::CommentStack& m_comments;
+
+            qi::rule<Iterator> start;
+            qi::rule<Iterator> block_comment, single_line_comment;
+        } skipper{m_comments};
+
+        template <typename Attr> using Production = qi::rule<Iterator, Attr(), Skip>;
+        template <typename Attr> using Lexeme     = qi::rule<Iterator, Attr()>;
+        Lexeme<AST::ObjectDef> start;
+        //
+        Production<AST::ObjectDef>      objectdef;
+        Production<AST::AttributeDefs>  attributedeflist;
+        Production<AST::AttributeDef>   attributedef;
+        Production<AST::AttributeValue> attributeval;
+        Production<AST::DoubleVal>      doubleval;
+        Production<AST::RefVal>         refval;
+
+        // lexemes
+        Lexeme<AST::Identifier> identifier, identimpl;
+        Lexeme<AST::StringVal> stringliteral;
+    };
+} // namespace Parser
+
+BOOST_FUSION_ADAPT_STRUCT(AST::AttributeDef, name, value)
+BOOST_FUSION_ADAPT_STRUCT(AST::ObjectDef, obj, class_, attributes)
+BOOST_FUSION_ADAPT_STRUCT(AST::DoubleVal, number)
+
+template <typename FwdIt>
+bool parser(FwdIt it, FwdIt end, AST::ObjectDef& objects) {
+    return qi::parse(it, end, Parser::ObjectDefParser<FwdIt>{}, objects);
 }
 
-int main(int, char *[]) {
-  std::string input(R"V0G0N_POETRY(
-/*c1*/
-myobj /*c2*/ sometype /*c3*/ ( /*c4*/ attr /*c5*/: /*c6*/ 10.0 )
-)V0G0N_POETRY");
-  std::string::const_iterator it = input.cbegin();
-  std::string::const_iterator end = input.end();
-  AST::ObjectDef ast;
-  const bool r = parser(it, end, ast);
+int main()
+{
+    for (std::string const input : {(R"(
+        /*c1*/
+        myobj /*c2*/ sometype /*c3*/ ( /*c4*/ attr /*c5*/: /*c6*/ 10.0 )
+    )")}) {
+        auto it = input.cbegin(), end = input.end();
+        AST::ObjectDef ast;
 
-  // In ast, the comment /*c6*/ is present 2 times on node DoubleVal(10.0)
-
-  if (r && it == end) {
-    std::cout << "Parsing succeeded\n";
-  } else {
-    std::cout << "Parsing failed\n";
-  }
-  std::cout << "  unparsed: ";
-  std::copy(it, end, std::ostream_iterator<char>(std::cout));
-  std::cout << "\n\n";
-  std::cout << "Bye... :-) \n\n";
+        // In ast, the comment /*c6*/ is present 2 times on node DoubleVal(10.0)
+        if (parser(it, end, ast)) {
+            std::cout << "Parsed: " << ast << "\n";
+        } else {
+            std::cout << "Parsing failed\n";
+        }
+    }
 }
